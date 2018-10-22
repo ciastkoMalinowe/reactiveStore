@@ -1,13 +1,12 @@
 package actors
 
 import scala.concurrent.duration._
-import akka.actor.Actor
-import akka.actor.Timers
+import akka.actor.{Actor, ActorRef, Timers}
 import actors.Cart
 
 case object Checkout {
   sealed trait Command
-  case class Start() extends Command
+  case class Start(cart: ActorRef) extends Command
   case class Cancel(id: String) extends Command
   case class SelectDelivery(delivery: String) extends Command
   case class SelectPayment(payment: String) extends Command
@@ -24,71 +23,71 @@ case object Checkout {
   private case object Timeout
 }
 
-class Checkout(cart: ActorRef) extends Actor with Timers{
+class Checkout() extends Actor with Timers{
 
   def receive = idle
 
   def idle: Receive = {
-    case Checkout.Start => {
-      changeState(selectingDelivery)
+    case Checkout.Start(cart) => {
+      changeState(selectingDelivery(cart))
     }
   }
 
-  def selectingDelivery: Receive = {
+  def selectingDelivery(cart: ActorRef): Receive = {
     case Checkout.EntryAction => {
       timers.startSingleTimer(Checkout.TimerKey, Checkout.Timeout, 5.minutes)
     }
     case Checkout.SelectDelivery => {
-      changeState(selectingPaymentMethod)
+      changeState(selectingPaymentMethod(cart))
     }
     case Checkout.Timeout => {
-      changeState(cancelled)
+      changeState(cancelled(cart))
     }
     case Checkout.Cancel => {
-      changeState(cancelled)
+      changeState(cancelled(cart))
     }
   }
 
-  def selectingPaymentMethod: Receive = {
+  def selectingPaymentMethod(cart: ActorRef): Receive = {
     case Checkout.PaymentSelected => {
-      changeState(processingPayment)
+      changeState(processingPayment(cart))
     }
     case Checkout.Timeout => {
-      changeState(cancelled)
+      changeState(cancelled(cart))
     }
     case Checkout.Cancel => {
-      changeState(cancelled)
+      changeState(cancelled(cart))
     }
     case Checkout.ExitAction => {
-      timers.cancel(TimerKey)
+      timers.cancel(Checkout.TimerKey)
     }
   }
 
-  def processingPayment: Receive = {
+  def processingPayment(cart: ActorRef): Receive = {
     case Checkout.EntryAction => {
       timers.startSingleTimer(Checkout.TimerKey, Checkout.Timeout, 5.minutes)
     }
     case Checkout.PaymentReceived => {
-      changeState(closed)
+      changeState(closed(cart))
     }
     case Checkout.Cancel => {
-      changeState(cancelled)
+      changeState(cancelled(cart))
     }
     case Checkout.Timeout => {
-      changeState(cancelled)
+      changeState(cancelled(cart))
     }
     case Checkout.ExitAction => {
-      timers.cancel(timerKey)
+      timers.cancel(Checkout.TimerKey)
     }
   }
 
-  def closed: Receive = {
+  def closed(cart: ActorRef): Receive = {
     case Checkout.EntryAction => {
       context stop self
     }
   }
 
-  def cancelled: Receive = {
+  def cancelled(cart: ActorRef): Receive = {
     case Checkout.EntryAction => {
       cart ! Cart.CheckoutCancelled
     }

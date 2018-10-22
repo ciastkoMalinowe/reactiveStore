@@ -1,8 +1,7 @@
 package actors
 
 import scala.concurrent.duration._
-import akka.actor.Actor
-import akka.actor.Timers
+import akka.actor.{Actor, ActorRef, Props, Timers}
 import actors.Checkout
 
 case object Cart {
@@ -25,7 +24,7 @@ case object Cart {
 
 class Cart extends Actor with Timers{
 
-  var items = collection.mutable.Map()
+  var items = collection.mutable.Map[String, Integer]()
   var itemCount = 0
   def receive = empty
 
@@ -36,7 +35,7 @@ class Cart extends Actor with Timers{
     case Cart.AddItem(id) => {
       addItem(id)
       changeState(nonEmpty)
-      sender ! Cart.ItemAdded()
+      sender ! Cart.ItemAdded(id)
     }
   }
 
@@ -46,19 +45,19 @@ class Cart extends Actor with Timers{
     }
     case Cart.AddItem(id) => {
       addItem(id)
-      sender ! Cart.ItemAdded()
+      sender ! Cart.ItemAdded(id)
     }
     case Cart.RemoveItem(id) => {
       removeItem(id)
-      if itemCount == 0 {
+      if (itemCount == 0) {
         changeState(empty)
       }
       sender ! Cart.ItemRemoved(id)
     }
     case Cart.StartCheckout() => {
-      changeState(inCheckout)
+      changeState(inCheckout(sender))
     }
-    case Cart.Timeout() => {
+    case Cart.Timeout => {
       changeState(empty)
     }
     case Cart.ExitAction() => {
@@ -68,8 +67,8 @@ class Cart extends Actor with Timers{
 
   def inCheckout(sender: ActorRef): Receive = {
     case Cart.EntryAction() => {
-      val checkout = context.actorOf(Props[Checkout(self)], "checkout")
-      checkout ! Checkout.Start()
+      val checkout = context.actorOf(Props[Checkout], "checkout")
+      checkout ! Checkout.Start(self)
       sender ! Cart.CheckoutStarted(checkout)
     }
     case Cart.CheckoutCancelled() => {
@@ -96,12 +95,12 @@ class Cart extends Actor with Timers{
 
   def removeItem(id: String): Unit ={
     items(id) -= 1
-    if items(id) == 0 items - id
+    if (items(id) == 0) items - id
     itemCount -= 1
   }
 
   def emptyCart(): Unit = {
-    items.empty()
+    items.empty
     itemCount = 0
   }
 }
