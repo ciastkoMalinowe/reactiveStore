@@ -3,98 +3,127 @@ package actors
 import scala.concurrent.duration._
 import akka.actor.{Actor, ActorRef, Timers}
 import actors.Cart
+import akka.event.LoggingReceive
 
 case object Checkout {
   sealed trait Command
-  case class Start(cart: ActorRef) extends Command
-  case class Cancel(id: String) extends Command
-  case class SelectDelivery(delivery: String) extends Command
-  case class SelectPayment(payment: String) extends Command
-  case class ReceivePayment() extends Command
+
+  case object Cancel extends Command
+  case object Start extends Command
+
+  case object Delivery {
+    sealed trait DeliveryType
+    case object None extends DeliveryType
+    case object Courier extends DeliveryType
+    case object Post extends DeliveryType
+    case object Shop extends DeliveryType
+  }
+  case class SelectDelivery(delivery: Delivery.DeliveryType) extends Command
+
+  case object PaymentMethod {
+    sealed trait PaymentType
+    case object None extends PaymentType
+    case object Transfer extends PaymentType
+    case object CreditCard extends PaymentType
+    case object Cash extends PaymentType
+  }
+  case class SelectPayment(payment: PaymentMethod.PaymentType) extends Command
+
+  case object ReceivePayment extends Command
+
   sealed trait Event
-  case class DeliverySelected(delivery: String) extends Event
-  case class PaymentSelected(payment: String) extends Event
-  case class PaymentReceived() extends Event
+  case class DeliverySelected(delivery: Delivery.DeliveryType) extends Event
+  case class PaymentSelected(payment: PaymentMethod.PaymentType) extends Event
+  case object PaymentReceived extends Event
 
-  private case class EntryAction()
-  private case class ExitAction()
-
-  private case object TimerKey
+  private case object CheckoutTimer
+  private case object PaymentTimer
   private case object Timeout
 }
 
-class Checkout() extends Actor with Timers{
+class Checkout extends Actor with Timers{
 
-  def receive = idle
+  val selectExpirationTime: FiniteDuration = 30.seconds
+  val payExpirationTime: FiniteDuration = 30.seconds
+  var sDelivery: Checkout.Delivery.DeliveryType = null
+  var sPayment: Checkout.PaymentMethod.PaymentType = null
+  def receive = LoggingReceive{idle}
 
   def idle: Receive = {
-    case Checkout.Start(cart) => {
-      changeState(selectingDelivery(cart))
+    case Checkout.Start => {
+      context become LoggingReceive{selectingDelivery(sender)}
+      onEntrySelectingDelivery()
     }
   }
 
   def selectingDelivery(cart: ActorRef): Receive = {
-    case Checkout.EntryAction => {
-      timers.startSingleTimer(Checkout.TimerKey, Checkout.Timeout, 5.minutes)
-    }
-    case Checkout.SelectDelivery => {
-      changeState(selectingPaymentMethod(cart))
+
+    case Checkout.SelectDelivery(delivery) => {
+      sDelivery = delivery
+      context become LoggingReceive{selectingPaymentMethod(cart)}
     }
     case Checkout.Timeout => {
-      changeState(cancelled(cart))
+      cancel(cart)
     }
     case Checkout.Cancel => {
-      changeState(cancelled(cart))
+      cancel(cart)
     }
   }
 
   def selectingPaymentMethod(cart: ActorRef): Receive = {
-    case Checkout.PaymentSelected => {
-      changeState(processingPayment(cart))
+    case Checkout.SelectPayment(payment) => {
+      sPayment = payment
+      onEntryProcessingPayment()
+      context become LoggingReceive{processingPayment(cart)}
+      onExitSelectingPaymentMethod()
     }
     case Checkout.Timeout => {
-      changeState(cancelled(cart))
+      onExitSelectingPaymentMethod()
+      cancel(cart)
     }
     case Checkout.Cancel => {
-      changeState(cancelled(cart))
-    }
-    case Checkout.ExitAction => {
-      timers.cancel(Checkout.TimerKey)
+      onExitSelectingPaymentMethod()
+      cancel(cart)
     }
   }
 
   def processingPayment(cart: ActorRef): Receive = {
-    case Checkout.EntryAction => {
-      timers.startSingleTimer(Checkout.TimerKey, Checkout.Timeout, 5.minutes)
-    }
-    case Checkout.PaymentReceived => {
-      changeState(closed(cart))
-    }
-    case Checkout.Cancel => {
-      changeState(cancelled(cart))
-    }
-    case Checkout.Timeout => {
-      changeState(cancelled(cart))
-    }
-    case Checkout.ExitAction => {
-      timers.cancel(Checkout.TimerKey)
-    }
-  }
 
-  def closed(cart: ActorRef): Receive = {
-    case Checkout.EntryAction => {
+    case Checkout.ReceivePayment => {
+      onExitProcessingPayment()
+      cart ! Cart.CheckoutClosed(sDelivery, sPayment)
+      sender ! Cart.CheckoutClosed(sDelivery, sPayment)
       context stop self
     }
-  }
-
-  def cancelled(cart: ActorRef): Receive = {
-    case Checkout.EntryAction => {
-      cart ! Cart.CheckoutCancelled
+    case Checkout.Cancel => {
+      onExitProcessingPayment()
+      cancel(cart)
+    }
+    case Checkout.Timeout => {
+      onExitProcessingPayment()
+      cancel(cart)
     }
   }
-  def changeState(state: Receive): Unit ={
-    self ! Checkout.ExitAction()
-    context.become(state)
-    self ! Checkout.EntryAction()
+
+  def onEntrySelectingDelivery(): Unit = {
+    timers.startSingleTimer(Checkout.CheckoutTimer, Checkout.Timeout, selectExpirationTime)
   }
+
+  def onExitSelectingPaymentMethod(): Unit = {
+    timers.cancel(Checkout.CheckoutTimer)
+  }
+
+  def onEntryProcessingPayment(): Unit = {
+    timers.startSingleTimer(Checkout.PaymentTimer, Checkout.Timeout, payExpirationTime)
+  }
+
+  def onExitProcessingPayment(): Unit = {
+    timers.cancel(Checkout.PaymentTimer)
+  }
+
+  def cancel(cart: ActorRef): Unit = {
+    cart ! Cart.CheckoutCancelled
+    //context stop self
+  }
+
 }

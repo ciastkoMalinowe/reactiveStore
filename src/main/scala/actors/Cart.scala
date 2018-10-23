@@ -3,87 +3,103 @@ package actors
 import scala.concurrent.duration._
 import akka.actor.{Actor, ActorRef, Props, Timers}
 import actors.Checkout
+import akka.event.LoggingReceive
+import fsm.Cart.Event
+import fsm.Checkout
 
 case object Cart {
   sealed trait Command
   case class AddItem(id: String) extends Command
   case class RemoveItem(id: String) extends Command
-  case class StartCheckout() extends Command
+  case object StartCheckout extends Command
   sealed trait Event
   case class ItemAdded(id: String) extends Event
   case class ItemRemoved(id: String) extends Event
-  case class CheckoutStarted(checkout: ActorRef) extends Event
-  case class CheckoutCancelled() extends Event
+  case class CheckoutStarted(actor: ActorRef) extends Event
+  case object CheckoutCancelled extends Event
+  case class CheckoutClosed(delivery: Checkout.Delivery.DeliveryType, payment: Checkout.PaymentMethod.PaymentType) extends Event
 
-  private case class EntryAction()
-  private case class ExitAction()
-
-  private case object TimerKey
+  private case object CartTimer
   private case object Timeout
 }
 
 class Cart extends Actor with Timers{
 
+  val cartExpirationTime: FiniteDuration = 30.seconds
   var items = collection.mutable.Map[String, Integer]()
   var itemCount = 0
-  def receive = empty
+  def receive = LoggingReceive{empty}
 
   def empty: Receive = {
-    case Cart.EntryAction => {
-      emptyCart()
-    }
     case Cart.AddItem(id) => {
       addItem(id)
-      changeState(nonEmpty)
+      context become LoggingReceive{nonEmpty}
       sender ! Cart.ItemAdded(id)
+      onEntryNonEmpty()
     }
   }
 
   def nonEmpty(): Receive = {
-    case Cart.EntryAction => {
-      timers.startSingleTimer(Cart.TimerKey, Cart.Timeout, 5.minutes)
-    }
     case Cart.AddItem(id) => {
       addItem(id)
       sender ! Cart.ItemAdded(id)
     }
-    case Cart.RemoveItem(id) => {
+    case Cart.RemoveItem(id) if itemCount == 1 => {
       removeItem(id)
-      if (itemCount == 0) {
-        changeState(empty)
-      }
+      onExitNonEmpty()
+      context become LoggingReceive{empty}
+      onEntryEmpty()
       sender ! Cart.ItemRemoved(id)
     }
-    case Cart.StartCheckout() => {
-      changeState(inCheckout(sender))
+    case Cart.RemoveItem(id) if itemCount > 1 => {
+      removeItem(id)
+      sender ! Cart.ItemRemoved(id)
+    }
+    case Cart.StartCheckout => {
+      onExitNonEmpty()
+      context become LoggingReceive{inCheckout(sender)}
+      onEntryInCheckout()
     }
     case Cart.Timeout => {
-      changeState(empty)
-    }
-    case Cart.ExitAction() => {
-      timers.cancel(Cart.TimerKey)
+      onExitNonEmpty()
+      context become LoggingReceive{empty}
+      onEntryEmpty()
     }
   }
 
   def inCheckout(sender: ActorRef): Receive = {
-    case Cart.EntryAction() => {
-      val checkout = context.actorOf(Props[Checkout], "checkout")
-      checkout ! Checkout.Start(self)
-      sender ! Cart.CheckoutStarted(checkout)
+
+    case Cart.CheckoutCancelled => {
+      context become LoggingReceive{nonEmpty}
+      onEntryNonEmpty()
     }
-    case Cart.CheckoutCancelled() => {
-      changeState(nonEmpty())
-    }
-    case Cart.ExitAction() => {
-      //remove checkout
+
+    case Cart.CheckoutClosed(delivery, method) => {
+      onEntryEmpty()
+      context become LoggingReceive{empty}
+
     }
   }
 
-  def changeState(state: Receive): Unit ={
-    self ! Cart.ExitAction()
-    context.become(state)
-    self ! Cart.EntryAction()
+  def onEntryEmpty(): Unit = {
+    emptyCart()
   }
+
+  def onEntryNonEmpty(): Unit = {
+    println("nonEmpty state!")
+    timers.startSingleTimer(Cart.CartTimer, Cart.Timeout, cartExpirationTime)
+  }
+
+  def onExitNonEmpty(): Unit = {
+    timers.cancel(Cart.CartTimer)
+  }
+
+  def onEntryInCheckout(): Unit = {
+    val checkout = context.actorOf(Props[Checkout], "checkout")
+    checkout ! Checkout.Start
+    sender ! Cart.CheckoutStarted(checkout)
+  }
+
 
   def addItem(id: String): Unit ={
     items(id) = items.get(id) match {
